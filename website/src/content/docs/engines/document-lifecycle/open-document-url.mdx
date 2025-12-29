@@ -32,7 +32,12 @@ When the server supports HTTP range requests (indicated by the `Accept-Ranges: b
 - Reduce initial bandwidth usage for large files
 - Improve perceived performance for users
 
-**Note:** Progressive loading uses synchronous XMLHttpRequest for range requests, which is necessary for PDFium's synchronous callback interface. While this approach is deprecated, it will be replaced with JavaScript Promise Integration (JSPI) once it becomes widely available in browsers.
+**How It Works:**
+Progressive loading uses intelligent async prefetching to avoid blocking the browser's main thread:
+1. **Initial Prefetch**: Critical PDF sections (header and cross-reference table) are fetched asynchronously before opening the document
+2. **Smart Caching**: Downloaded chunks are cached to avoid redundant network requests
+3. **Adaptive Loading**: Additional chunks are prefetched in the background based on access patterns
+4. **Non-Blocking**: All network requests use modern async fetch API, keeping the UI responsive
 </Callout>
 
 ## Parameters

@@ -207,11 +207,25 @@ export class PdfEngine<T = Blob> implements IPdfEngine<T> {
         // mode === 'full-fetch' will skip range requests
 
         if (useRangeRequests && fileSize > 0) {
-          // Use progressive loading with range requests
-          const { readBlock } = createRangeRequestLoader(
+          // Use progressive loading with async prefetching (non-blocking)
+          this.logger.debug(
+            LOG_SOURCE,
+            LOG_CATEGORY,
+            `Prefetching critical PDF sections for ${file.url}`,
+          );
+
+          // Create loader and wait for initial prefetch (non-blocking async)
+          const { readBlock, prefetchNextChunks } = await createRangeRequestLoader(
             file.url,
             fileSize,
+            this.options.fetcher,
             options?.requestOptions,
+          );
+
+          this.logger.debug(
+            LOG_SOURCE,
+            LOG_CATEGORY,
+            `Initial prefetch complete, opening document ${file.id}`,
           );
 
           const pdfFileLoader: PdfFileLoader = {
@@ -233,7 +247,11 @@ export class PdfEngine<T = Blob> implements IPdfEngine<T> {
               { priority: Priority.CRITICAL },
             )
             .wait(
-              (doc) => task.resolve(doc),
+              (doc) => {
+                // Start prefetching additional chunks in the background
+                prefetchNextChunks(0, 10); // Prefetch first 10 chunks
+                task.resolve(doc);
+              },
               (error) => task.fail(error),
             );
         } else {
