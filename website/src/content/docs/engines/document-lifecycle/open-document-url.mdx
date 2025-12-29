@@ -8,7 +8,7 @@ searchable: true
 
 import { Callout } from '@/components/callout'
 
-Opens a PDF document from a given URL by downloading the entire file.
+Opens a PDF document from a given URL with support for progressive loading via HTTP range requests.
 
 ## Signature
 
@@ -18,11 +18,21 @@ openDocumentUrl(file: PdfFileUrl, options?: PdfOpenDocumentUrlOptions): PdfTask<
 
 ## Description
 
-This function initiates the process of loading a PDF file from a remote URL. It fetches the complete file content into memory before opening it.
+This function initiates the process of loading a PDF file from a remote URL. It supports three loading modes:
+
+- **Auto mode** (default): Automatically detects if the server supports HTTP range requests and uses progressive loading when available
+- **Range request mode**: Forces progressive loading using HTTP range requests (falls back to full fetch if not supported)
+- **Full fetch mode**: Downloads the entire PDF file at once
 
 <Callout>
-**Note on Loading Strategy**
-Currently, this function **always** downloads the entire PDF file. Support for progressive loading via HTTP range requests is planned for a future release. The `mode` option is reserved for this future enhancement and will have no effect on the current behavior.
+**Progressive Loading Benefits**
+
+When the server supports HTTP range requests (indicated by the `Accept-Ranges: bytes` header), the PDF viewer can:
+- Start rendering pages faster by loading only the required data
+- Reduce initial bandwidth usage for large files
+- Improve perceived performance for users
+
+**Note:** Progressive loading uses synchronous XMLHttpRequest for range requests, which is necessary for PDFium's synchronous callback interface. While this approach is deprecated, it will be replaced with JavaScript Promise Integration (JSPI) once it becomes widely available in browsers.
 </Callout>
 
 ## Parameters
@@ -38,8 +48,10 @@ Currently, this function **always** downloads the entire PDF file. Support for p
 export interface PdfOpenDocumentUrlOptions {
   password?: string;
   /**
-   * NOTE: This option is reserved for future use. Currently, only the 'full-fetch'
-   * behavior is implemented regardless of the selected mode.
+   * Loading mode strategy:
+   * - 'auto': Automatically detect range request support (default)
+   * - 'range-request': Force progressive loading via range requests
+   * - 'full-fetch': Always download the complete file
    */
   mode?: 'auto' | 'range-request' | 'full-fetch';
   /**
@@ -47,7 +59,7 @@ export interface PdfOpenDocumentUrlOptions {
    */
   requestOptions?: {
     /**
-     * Custom HTTP headers to include in all requests
+     * Custom HTTP headers to include in all requests (HEAD, GET, and range requests)
      */
     headers?: Record<string, string>;
     /**
@@ -121,6 +133,28 @@ const document = await engine.openDocumentUrl(fileUrl, {
 }).toPromise();
 
 console.log(`Opened document with ${document.pageCount} pages using session cookies.`);
+```
+
+### Using Progressive Loading Modes
+
+```typescript
+// Auto mode (default) - automatically detects range request support
+const fileUrl1 = { id: 'auto-doc', url: 'https://example.com/large-document.pdf' };
+const doc1 = await engine.openDocumentUrl(fileUrl1, {
+  mode: 'auto' // This is the default, can be omitted
+}).toPromise();
+
+// Force progressive loading with range requests
+const fileUrl2 = { id: 'progressive-doc', url: 'https://example.com/document.pdf' };
+const doc2 = await engine.openDocumentUrl(fileUrl2, {
+  mode: 'range-request' // Will fall back to full fetch if server doesn't support it
+}).toPromise();
+
+// Force full download (useful for small files or when range requests cause issues)
+const fileUrl3 = { id: 'full-doc', url: 'https://example.com/small-document.pdf' };
+const doc3 = await engine.openDocumentUrl(fileUrl3, {
+  mode: 'full-fetch' // Always downloads the complete file
+}).toPromise();
 ```
 
 <Callout type="warning">

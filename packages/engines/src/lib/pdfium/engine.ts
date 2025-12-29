@@ -41,6 +41,7 @@ import {
   PdfStrikeOutAnnoObject,
   PdfUnderlineAnnoObject,
   PdfFile,
+  PdfFileLoader,
   PdfSegmentObject,
   AppearanceMode,
   PdfImageObject,
@@ -379,6 +380,157 @@ export class PdfiumNative implements IPdfiumExecutor {
     this.logger.perf(LOG_SOURCE, LOG_CATEGORY, `OpenDocumentBuffer`, 'End', file.id);
 
     return PdfTaskHelper.resolve(pdfDoc);
+  }
+
+  /**
+   * Open a PDF document using a custom loader (for progressive/streaming loading)
+   *
+   * @public
+   */
+  openDocumentLoader(
+    file: PdfFileLoader,
+    options?: PdfOpenDocumentBufferOptions,
+  ): PdfTask<PdfDocumentObject> {
+    this.logger.debug(LOG_SOURCE, LOG_CATEGORY, 'openDocumentLoader', file, options);
+    this.logger.perf(LOG_SOURCE, LOG_CATEGORY, `OpenDocumentLoader`, 'Begin', file.id);
+
+    // Allocate memory for FPDF_FILEACCESS structure
+    // Structure layout: { m_FileLen: uint32, m_GetBlock: pointer, m_Param: pointer }
+    const fileAccessPtr = this.memoryManager.malloc(12); // 4 + 4 + 4 bytes
+
+    // Set file length (m_FileLen)
+    this.pdfiumModule.pdfium.HEAPU32[fileAccessPtr / 4] = file.fileLength;
+
+    // Create the m_GetBlock callback function
+    // Signature: int (*m_GetBlock)(void* param, unsigned long position, unsigned char* pBuf, unsigned long size)
+    const getBlockCallback = (
+      _param: number,
+      position: number,
+      pBuf: number,
+      size: number,
+    ): number => {
+      try {
+        // Call the user-provided callback to get the data
+        const data = file.callback(position, size);
+
+        if (!data || data.length === 0) {
+          return 0; // Indicate failure
+        }
+
+        // Copy data to the provided buffer
+        this.pdfiumModule.pdfium.HEAPU8.set(data, pBuf);
+
+        return 1; // Indicate success
+      } catch (error) {
+        this.logger.error(LOG_SOURCE, LOG_CATEGORY, 'getBlockCallback error', error);
+        return 0; // Indicate failure
+      }
+    };
+
+    // Add the callback function to the function table
+    const getBlockPtr = this.pdfiumModule.pdfium.addFunction(getBlockCallback, 'iiiii');
+
+    // Set m_GetBlock pointer
+    this.pdfiumModule.pdfium.HEAPU32[fileAccessPtr / 4 + 1] = getBlockPtr;
+
+    // Set m_Param pointer (can be 0 if not needed)
+    this.pdfiumModule.pdfium.HEAPU32[fileAccessPtr / 4 + 2] = 0;
+
+    try {
+      // Load document using custom access
+      const docPtr = this.pdfiumModule.FPDF_LoadCustomDocument(
+        fileAccessPtr,
+        options?.password ?? '',
+      );
+
+      if (!docPtr) {
+        const lastError = this.pdfiumModule.FPDF_GetLastError();
+        this.logger.error(
+          LOG_SOURCE,
+          LOG_CATEGORY,
+          `FPDF_LoadCustomDocument failed with ${lastError}`,
+        );
+
+        // Clean up
+        this.pdfiumModule.pdfium.removeFunction(getBlockPtr);
+        this.memoryManager.free(fileAccessPtr);
+        this.logger.perf(LOG_SOURCE, LOG_CATEGORY, `OpenDocumentLoader`, 'End', file.id);
+
+        return PdfTaskHelper.reject<PdfDocumentObject>({
+          code: lastError,
+          message: `FPDF_LoadCustomDocument failed`,
+        });
+      }
+
+      const pageCount = this.pdfiumModule.FPDF_GetPageCount(docPtr);
+
+      const pages: PdfPageObject[] = [];
+      const sizePtr = this.memoryManager.malloc(8);
+      for (let index = 0; index < pageCount; index++) {
+        const result = this.pdfiumModule.FPDF_GetPageSizeByIndexF(docPtr, index, sizePtr);
+        if (!result) {
+          const lastError = this.pdfiumModule.FPDF_GetLastError();
+          this.logger.error(
+            LOG_SOURCE,
+            LOG_CATEGORY,
+            `FPDF_GetPageSizeByIndexF failed with ${lastError}`,
+          );
+          this.memoryManager.free(sizePtr);
+          this.pdfiumModule.FPDF_CloseDocument(docPtr);
+          this.pdfiumModule.pdfium.removeFunction(getBlockPtr);
+          this.memoryManager.free(fileAccessPtr);
+          this.logger.perf(LOG_SOURCE, LOG_CATEGORY, `OpenDocumentLoader`, 'End', file.id);
+          return PdfTaskHelper.reject<PdfDocumentObject>({
+            code: lastError,
+            message: `FPDF_GetPageSizeByIndexF failed`,
+          });
+        }
+
+        const rotation = this.pdfiumModule.EPDF_GetPageRotationByIndex(docPtr, index) as Rotation;
+
+        const page = {
+          index,
+          size: {
+            width: this.pdfiumModule.pdfium.getValue(sizePtr, 'float'),
+            height: this.pdfiumModule.pdfium.getValue(sizePtr + 4, 'float'),
+          },
+          rotation,
+        };
+
+        pages.push(page);
+      }
+      this.memoryManager.free(sizePtr);
+
+      const pdfDoc: PdfDocumentObject = {
+        id: file.id,
+        pageCount,
+        pages,
+      };
+
+      // Store the document in cache
+      // Note: We use fileAccessPtr as the file pointer since the data is accessed via callback
+      this.cache.setDocument(file.id, fileAccessPtr, docPtr);
+
+      // Store the function pointer so we can clean it up later
+      const ctx = this.cache.getContext(file.id);
+      if (ctx) {
+        (ctx as any)._getBlockPtr = getBlockPtr;
+      }
+
+      this.logger.perf(LOG_SOURCE, LOG_CATEGORY, `OpenDocumentLoader`, 'End', file.id);
+
+      return PdfTaskHelper.resolve(pdfDoc);
+    } catch (error) {
+      // Clean up on error
+      this.pdfiumModule.pdfium.removeFunction(getBlockPtr);
+      this.memoryManager.free(fileAccessPtr);
+      this.logger.perf(LOG_SOURCE, LOG_CATEGORY, `OpenDocumentLoader`, 'End', file.id);
+
+      return PdfTaskHelper.reject<PdfDocumentObject>({
+        code: PdfErrorCode.Unknown,
+        message: String(error),
+      });
+    }
   }
 
   /**

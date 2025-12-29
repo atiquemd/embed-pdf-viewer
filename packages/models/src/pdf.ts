@@ -3062,6 +3062,10 @@ export interface IPdfiumExecutor {
     file: PdfFile,
     options?: PdfOpenDocumentBufferOptions,
   ): PdfTask<PdfDocumentObject>;
+  openDocumentLoader(
+    file: PdfFileLoader,
+    options?: PdfOpenDocumentBufferOptions,
+  ): PdfTask<PdfDocumentObject>;
   getMetadata(doc: PdfDocumentObject): PdfTask<PdfMetadataObject>;
   setMetadata(doc: PdfDocumentObject, metadata: Partial<PdfMetadataObject>): PdfTask<boolean>;
   getDocPermissions(doc: PdfDocumentObject): PdfTask<number>;

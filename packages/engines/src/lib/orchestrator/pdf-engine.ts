@@ -9,6 +9,7 @@ import {
   PdfErrorReason,
   PdfFileUrl,
   PdfFile,
+  PdfFileLoader,
   PdfOpenDocumentUrlOptions,
   PdfOpenDocumentBufferOptions,
   PdfMetadataObject,
@@ -48,6 +49,10 @@ import {
 } from '@embedpdf/models';
 import { WorkerTaskQueue, Priority } from './task-queue';
 import type { ImageDataConverter } from '../converters/types';
+import {
+  checkRangeRequestSupport,
+  createRangeRequestLoader,
+} from '../utils/range-request';
 
 // Re-export for convenience
 export type { ImageDataConverter } from '../converters/types';
@@ -157,21 +162,98 @@ export class PdfEngine<T = Blob> implements IPdfEngine<T> {
           throw new Error('Fetcher is not set');
         }
 
-        const response = await this.options.fetcher(file.url, options?.requestOptions);
-        const arrayBuf = await response.arrayBuffer();
+        const mode = options?.mode ?? 'auto';
+        let useRangeRequests = false;
+        let fileSize = 0;
 
-        const pdfFile: PdfFile = {
-          id: file.id,
-          content: arrayBuf,
-        };
+        // Determine loading strategy
+        if (mode === 'range-request') {
+          // Force range requests
+          const capability = await checkRangeRequestSupport(
+            file.url,
+            this.options.fetcher,
+            options?.requestOptions,
+          );
 
-        // Then open in worker - use wait() to properly propagate task errors
-        this.openDocumentBuffer(pdfFile, {
-          password: options?.password,
-        }).wait(
-          (doc) => task.resolve(doc),
-          (error) => task.fail(error),
-        );
+          if (!capability.supportsRangeRequests) {
+            this.logger.warn(
+              LOG_SOURCE,
+              LOG_CATEGORY,
+              'Range requests not supported by server, falling back to full fetch',
+            );
+            useRangeRequests = false;
+          } else {
+            useRangeRequests = true;
+            fileSize = capability.fileSize;
+          }
+        } else if (mode === 'auto') {
+          // Auto-detect range request support
+          const capability = await checkRangeRequestSupport(
+            file.url,
+            this.options.fetcher,
+            options?.requestOptions,
+          );
+
+          if (capability.supportsRangeRequests && capability.fileSize > 0) {
+            useRangeRequests = true;
+            fileSize = capability.fileSize;
+            this.logger.debug(
+              LOG_SOURCE,
+              LOG_CATEGORY,
+              `Using progressive loading for ${file.url} (${fileSize} bytes)`,
+            );
+          }
+        }
+        // mode === 'full-fetch' will skip range requests
+
+        if (useRangeRequests && fileSize > 0) {
+          // Use progressive loading with range requests
+          const { readBlock } = createRangeRequestLoader(
+            file.url,
+            fileSize,
+            options?.requestOptions,
+          );
+
+          const pdfFileLoader: PdfFileLoader = {
+            id: file.id,
+            fileLength: fileSize,
+            callback: readBlock,
+          };
+
+          // Open document using custom loader in worker
+          this.workerQueue
+            .enqueue(
+              {
+                execute: () =>
+                  this.executor.openDocumentLoader(pdfFileLoader, {
+                    password: options?.password,
+                  }),
+                meta: { docId: file.id, operation: 'openDocumentLoader' },
+              },
+              { priority: Priority.CRITICAL },
+            )
+            .wait(
+              (doc) => task.resolve(doc),
+              (error) => task.fail(error),
+            );
+        } else {
+          // Use full fetch (traditional approach)
+          const response = await this.options.fetcher(file.url, options?.requestOptions);
+          const arrayBuf = await response.arrayBuffer();
+
+          const pdfFile: PdfFile = {
+            id: file.id,
+            content: arrayBuf,
+          };
+
+          // Then open in worker - use wait() to properly propagate task errors
+          this.openDocumentBuffer(pdfFile, {
+            password: options?.password,
+          }).wait(
+            (doc) => task.resolve(doc),
+            (error) => task.fail(error),
+          );
+        }
       } catch (error) {
         // This only catches fetch errors (network issues, etc.)
         task.reject({ code: PdfErrorCode.Unknown, message: String(error) });

@@ -91,11 +91,12 @@ export class PdfCache {
 
 export class DocumentContext {
   private readonly pageCache: PageCache;
+  private _getBlockPtr?: number; // Function pointer for custom document loader
 
   constructor(
     public readonly filePtr: number,
     public readonly docPtr: number,
-    pdfium: WrappedPdfiumModule,
+    private readonly pdfium: WrappedPdfiumModule,
     private readonly memoryManager: MemoryManager,
     config: Required<CacheConfig>,
   ) {
@@ -130,7 +131,13 @@ export class DocumentContext {
     // 2️⃣ close the PDFium document
     this.pageCache.pdf.FPDF_CloseDocument(this.docPtr);
 
-    // 3️⃣ free the file handle through memory manager for proper tracking
+    // 3️⃣ clean up custom loader function pointer if it exists
+    if (this._getBlockPtr !== undefined) {
+      this.pdfium.pdfium.removeFunction(this._getBlockPtr);
+      this._getBlockPtr = undefined;
+    }
+
+    // 4️⃣ free the file handle through memory manager for proper tracking
     this.memoryManager.free(WasmPointer(this.filePtr));
   }
 }
